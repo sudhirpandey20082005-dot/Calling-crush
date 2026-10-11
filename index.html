@@ -76,7 +76,7 @@ h1{margin:0}p{margin:0;color:var(--mu)}#err{color:var(--rd)}
 
 <script>
 const $=id=>document.getElementById(id);
-let peer,conn,call,local,code,incoming,ctype,got=false,ring,tick,secs=0;
+let peer,conn,call,local,code,inc=null,out=null,waitCall=false,ctype,got=false,ring,tick,secs=0;
 const rnd=()=>Array.from(crypto.getRandomValues(new Uint8Array(6)),b=>'abcdefghjkmnpqrstuvwxyz23456789'[b%31]).join('');
 const hash=(location.hash||'').slice(1).toLowerCase();
 if(hash){$('start').className='btn alt';$('join').style.display='block';$('sub').textContent='Aapke dost ne chat link bheja hai. Join karo.'}
@@ -98,19 +98,19 @@ function startHost(){
   peer.on('open',()=>status('Waiting for friend to join…'));
   peer.on('error',e=>{if(e.type==='unavailable-id'){code=rnd();location.hash=code;peer.destroy();startHost()}else status('Error: '+e.type)});
   peer.on('connection',c=>{if(conn&&conn.open){c.close();return}conn=c;chat(c)});
-  peer.on('call',onCall);
+  peer.on('call',onCall);peer.on('disconnected',()=>{try{peer.reconnect()}catch(e){}});
 }
 function startGuest(){
   status('Connecting…');peer=new Peer();
   peer.on('open',()=>{conn=peer.connect('hangout-'+code,{reliable:true});chat(conn)});
   peer.on('error',e=>status(e.type==='peer-unavailable'?'Friend ne abhi chat start nahi kiya':'Error: '+e.type));
-  peer.on('call',onCall);
+  peer.on('call',onCall);peer.on('disconnected',()=>{try{peer.reconnect()}catch(e){}});
 }
 function online(on){status(on?'Online':'Offline');$('vc').disabled=$('ac').disabled=!on}
 function chat(c){
   const up=()=>{online(true);sys('Friend connected')};
   c.open?up():c.on('open',up);
-  c.on('data',d=>{if(d&&typeof d.t==='string')bubble(d.t.slice(0,1000))});
+  c.on('data',d=>{if(!d)return;if(typeof d.t==='string')bubble(d.t.slice(0,1000));else if(d.k)onCtl(d)});
   c.on('close',()=>{online(false);sys('Friend disconnected');endCall(true)});
 }
 function wire(){
@@ -135,25 +135,42 @@ function show(type,txt){
   $('local').srcObject=local;$('cam').style.display=type==='video'?'':'none';$('cst').textContent=txt;
   $('mic').className='';$('mic').textContent='🎤';$('cam').className='';$('cam').textContent='📷';
 }
+function ctl(o){try{if(conn&&conn.open)conn.send(o)}catch(e){}}
+function hideInc(){$('inc').style.display='none'}
 async function dial(type){
-  if(call||incoming||!conn||!conn.open)return;
+  if(out||call||inc||waitCall||!conn||!conn.open)return;
   local=await media(type);if(!local){sys('Mic/camera allow nahi hua. Browser settings check karo.');return}
-  show(type,'Calling…');got=false;
-  call=peer.call(conn.peer,local,{metadata:{type}});hook(call);
-  ring=setTimeout(()=>{if(!got){endCall(false,'Koi jawab nahi diya')}},35000);
+  out=type;got=false;show(type,'Ringing…');ctl({k:'ring',type});
+  ring=setTimeout(()=>{if(out&&!got)endCall(false,'Koi jawab nahi diya')},35000);
+}
+function onCtl(d){
+  if(d.k==='ring'){
+    if(out||call||inc||waitCall){ctl({k:'dec',busy:1});return}
+    inc={type:d.type==='video'?'video':'audio'};
+    $('itx').textContent=inc.type==='video'?'Incoming video call…':'Incoming audio call…';$('inc').style.display='flex';
+  }else if(d.k==='acc'){if(out&&!call)placeCall()}
+  else if(d.k==='dec'){if(out)endCall(true,d.busy?'Friend busy hai':'Call decline hua')}
+  else if(d.k==='end'){
+    if(inc){inc=null;hideInc();sys('Missed call')}
+    else if(out||call||waitCall)endCall(true);
+  }
+}
+async function placeCall(){
+  clearTimeout(ring);$('cst').textContent='Connecting…';
+  if(peer.disconnected){try{peer.reconnect()}catch(e){}await new Promise(r=>{peer.once('open',r);setTimeout(r,3000)})}
+  call=peer.call(conn.peer,local,{metadata:{type:out}});hook(call);
+  ring=setTimeout(()=>{if(!got)endCall(false,'Call connect nahi hua (network issue)')},25000);
 }
 function onCall(c){
-  if(call||incoming){c.close();return}
-  incoming=c;const t=(c.metadata&&c.metadata.type)==='video'?'video':'audio';c._t=t;
-  $('itx').textContent=t==='video'?'Incoming video call…':'Incoming audio call…';$('inc').style.display='flex';
-  c.on('close',()=>{if(incoming===c){incoming=null;$('inc').style.display='none';sys('Missed '+t+' call')}});
+  if(waitCall&&local){waitCall=false;call=c;c.answer(local);hook(c)}else c.close();
 }
-$('dec').onclick=()=>{if(!incoming)return;const c=incoming;incoming=null;$('inc').style.display='none';c.close();sys('Call declined')};
+$('dec').onclick=()=>{if(!inc)return;inc=null;hideInc();ctl({k:'dec'});sys('Call declined')};
 $('acc').onclick=async()=>{
-  if(!incoming)return;const c=incoming,t=c._t;
-  local=await media(t);$('inc').style.display='none';
-  if(!local){incoming=null;c.close();sys('Mic/camera allow nahi hua');return}
-  incoming=null;call=c;got=false;show(t,'Connecting…');c.answer(local);hook(c);
+  if(!inc)return;const t=inc.type;hideInc();
+  local=await media(t);
+  if(!local){inc=null;ctl({k:'dec'});sys('Mic/camera allow nahi hua');return}
+  inc=null;waitCall=true;got=false;show(t,'Connecting…');ctl({k:'acc'});
+  ring=setTimeout(()=>{if(!got)endCall(false,'Call connect nahi hua (network issue)')},30000);
 };
 function hook(c){
   c.on('stream',s=>{got=true;clearTimeout(ring);$('remote').srcObject=s;secs=0;$('cst').textContent='00:00';
@@ -163,8 +180,10 @@ function hook(c){
 function endCall(remote,why){
   clearTimeout(ring);clearInterval(tick);
   const was=$('call').style.display==='flex';
-  if(call){try{call.close()}catch(e){}call=null}
+  if(!remote&&(was||out||waitCall))ctl({k:'end'});
+  if(call){const c=call;call=null;try{c.close()}catch(e){}}
   if(local){local.getTracks().forEach(t=>t.stop());local=null}
+  out=null;waitCall=false;got=false;
   $('remote').srcObject=null;$('call').style.display='none';
   if(was)sys(why||('Call ended'+(secs?' ('+$('cst').textContent+')':'')));secs=0;
 }
